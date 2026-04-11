@@ -48,6 +48,12 @@ function which(cmd) {
 function resolveRunner() {
   const pnpm = which("pnpm");
   if (pnpm) {
+    // On Windows, spawning an absolute "*.cmd" path via `shell: true`
+    // can break when the path includes spaces (e.g. "C:\\Program Files\\...").
+    // Use a plain command name so cmd.exe resolves it from PATH.
+    if (process.platform === "win32") {
+      return { cmd: "pnpm.cmd", kind: "pnpm" };
+    }
     return { cmd: pnpm, kind: "pnpm" };
   }
   return null;
