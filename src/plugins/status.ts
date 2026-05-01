@@ -1,3 +1,4 @@
+import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -24,6 +25,7 @@ import type { PluginManifestRecord } from "./manifest-registry.js";
 import type { PluginDiagnostic } from "./manifest-types.js";
 import { tracePluginLifecyclePhase } from "./plugin-lifecycle-trace.js";
 import {
+  loadPluginManifestRegistryForPluginRegistry,
   loadPluginRegistrySnapshotWithMetadata,
   type PluginRegistrySnapshotDiagnostic,
   type PluginRegistrySnapshotSource,
@@ -167,6 +169,7 @@ type PluginReportParams = {
   /** Use an explicit env when plugin roots should resolve independently from process.env. */
   env?: NodeJS.ProcessEnv;
   logger?: PluginLogger;
+  resolvedConfig?: OpenClawConfig;
 };
 
 function buildPluginRecordFromInstalledIndex(
@@ -197,17 +200,19 @@ function buildPluginRecordFromInstalledIndex(
     channelIds: [...(manifest?.channels ?? [])],
     cliBackendIds: [...(manifest?.cliBackends ?? []), ...(manifest?.setup?.cliBackends ?? [])],
     providerIds: [...(manifest?.providers ?? [])],
-    speechProviderIds: [],
-    realtimeTranscriptionProviderIds: [],
-    realtimeVoiceProviderIds: [],
-    mediaUnderstandingProviderIds: [],
-    imageGenerationProviderIds: [],
-    videoGenerationProviderIds: [],
-    musicGenerationProviderIds: [],
-    webFetchProviderIds: [],
-    webSearchProviderIds: [],
-    migrationProviderIds: [],
-    memoryEmbeddingProviderIds: [],
+    speechProviderIds: [...(manifest?.contracts?.speechProviders ?? [])],
+    realtimeTranscriptionProviderIds: [
+      ...(manifest?.contracts?.realtimeTranscriptionProviders ?? []),
+    ],
+    realtimeVoiceProviderIds: [...(manifest?.contracts?.realtimeVoiceProviders ?? [])],
+    mediaUnderstandingProviderIds: [...(manifest?.contracts?.mediaUnderstandingProviders ?? [])],
+    imageGenerationProviderIds: [...(manifest?.contracts?.imageGenerationProviders ?? [])],
+    videoGenerationProviderIds: [...(manifest?.contracts?.videoGenerationProviders ?? [])],
+    musicGenerationProviderIds: [...(manifest?.contracts?.musicGenerationProviders ?? [])],
+    webFetchProviderIds: [...(manifest?.contracts?.webFetchProviders ?? [])],
+    webSearchProviderIds: [...(manifest?.contracts?.webSearchProviders ?? [])],
+    migrationProviderIds: [...(manifest?.contracts?.migrationProviders ?? [])],
+    memoryEmbeddingProviderIds: [...(manifest?.contracts?.memoryEmbeddingProviders ?? [])],
     agentHarnessIds: [],
     gatewayMethods: [],
     cliCommands: [],
@@ -259,13 +264,27 @@ function buildPluginReport(
   params: PluginReportParams | undefined,
   loadModules: boolean,
 ): PluginStatusReport {
+  const rawConfig = params?.config ?? getRuntimeConfig();
+  const initialWorkspaceDir =
+    params?.workspaceDir ??
+    resolveAgentWorkspaceDir(rawConfig, resolveDefaultAgentId(rawConfig), params?.env);
+  const manifestRegistry = !loadModules
+    ? loadPluginManifestRegistryForPluginRegistry({
+        config: rawConfig,
+        env: params?.env,
+        workspaceDir: initialWorkspaceDir,
+        includeDisabled: true,
+      })
+    : undefined;
   const baseContext = resolvePluginRuntimeLoadContext({
-    config: params?.config ?? getRuntimeConfig(),
+    config: rawConfig,
     env: params?.env,
     logger: params?.logger,
-    workspaceDir: params?.workspaceDir,
+    workspaceDir: initialWorkspaceDir,
+    manifestRegistry,
   });
-  const workspaceDir = baseContext.workspaceDir ?? resolveDefaultAgentWorkspaceDir();
+  const workspaceDir =
+    baseContext.workspaceDir ?? initialWorkspaceDir ?? resolveDefaultAgentWorkspaceDir();
   const context =
     workspaceDir === baseContext.workspaceDir
       ? baseContext
@@ -273,7 +292,6 @@ function buildPluginReport(
           ...baseContext,
           workspaceDir,
         };
-  const rawConfig = context.rawConfig;
   const config = context.config;
 
   // Apply bundled-provider allowlist compat so that `plugins list` and `doctor`
@@ -286,6 +304,7 @@ function buildPluginReport(
     config,
     workspaceDir,
     env: params?.env,
+    manifestRegistry,
   });
   const effectiveConfig = withBundledPluginAllowlistCompat({
     config,
@@ -319,6 +338,7 @@ function buildPluginReport(
               loadModules,
               activate: false,
               cache: false,
+              installBundledRuntimeDeps: false,
               onlyPluginIds,
             }),
           ),
@@ -335,6 +355,8 @@ function buildPluginReport(
             logger: params?.logger,
             loadModules: false,
             onlyPluginIds,
+            manifestRegistry,
+            runtimeContext: context,
           }),
         { surface: "status", onlyPluginCount: onlyPluginIds?.length },
       );
@@ -375,14 +397,17 @@ export function buildPluginInspectReport(params: {
   env?: NodeJS.ProcessEnv;
   logger?: PluginLogger;
   report?: PluginStatusReport;
+  resolvedConfig?: OpenClawConfig;
 }): PluginInspectReport | null {
   const rawConfig = params.config ?? getRuntimeConfig();
-  const config = resolvePluginRuntimeLoadContext({
-    config: rawConfig,
-    env: params.env,
-    logger: params.logger,
-    workspaceDir: params.workspaceDir,
-  }).config;
+  const config =
+    params.resolvedConfig ??
+    resolvePluginRuntimeLoadContext({
+      config: rawConfig,
+      env: params.env,
+      logger: params.logger,
+      workspaceDir: params.workspaceDir,
+    }).config;
   const report =
     params.report ??
     buildPluginDiagnosticsReport({
@@ -507,6 +532,12 @@ export function buildAllPluginInspectReports(params?: {
   report?: PluginStatusReport;
 }): PluginInspectReport[] {
   const rawConfig = params?.config ?? getRuntimeConfig();
+  const config = resolvePluginRuntimeLoadContext({
+    config: rawConfig,
+    env: params?.env,
+    logger: params?.logger,
+    workspaceDir: params?.workspaceDir,
+  }).config;
   const report =
     params?.report ??
     buildPluginDiagnosticsReport({
@@ -522,6 +553,9 @@ export function buildAllPluginInspectReports(params?: {
         id: plugin.id,
         config: rawConfig,
         logger: params?.logger,
+        workspaceDir: params?.workspaceDir,
+        env: params?.env,
+        resolvedConfig: config,
         report,
       }),
     )
